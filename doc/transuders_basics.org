@@ -1,0 +1,238 @@
+Start with a reducing function. A commonly used reduce function is an adder:
+
+#+BEGIN_SRC clojure
+  (def adder
+    (fn [memo next]
+      (+ memo next)))
+#+END_SRC
+
+This can be used to reduce a list of numbers like so:
+
+#+BEGIN_SRC clojure
+  (reduce adder [1 2 3 4]) ;=> 10
+#+END_SRC
+
+Let's make it even clearer by adding an initial value to the reduce:
+
+#+BEGIN_SRC clojure
+  (reduce adder 0 [1 2 3 4]) ;=> 10
+#+END_SRC
+
+As Rich states in his post, a transducer is a function that takes as
+input a reducing function, and returns a reducing function.
+
+To start, let's take what is presumably a harmless transducer, and
+apply it to our reducing function:
+
+#+BEGIN_SRC clojure
+  (def t-map-identity (map identity)) ; This is a transducer
+  (def transduced-adder (t-map-identity adder)) ; This is a reducing function
+#+END_SRC
+
+It's important to note that a transducer is not a reducing function.
+
+#+BEGIN_SRC clojure
+(reduce t-map-identity 0 [1 2 3]) ;=> Exception!
+#+END_SRC
+
+But what's returned from passing `adder` to our transducer is a
+reducing function that behaves like our original.
+
+#+BEGIN_SRC clojure
+  (reduce transduced-adder [1 2 3 4]) ;=> 10
+#+END_SRC
+
+Not very useful, but interesting. Let's look at what exactly `(map
+identity)` did above. First the source for the new transducer
+generating `map` when it has only one argument.
+
+#+BEGIN_SRC clojure
+  (defn map [f]
+    (fn [f1]
+      (fn
+        ([] (f1))
+        ([result] (f1 result))
+        ([result input]
+           (f1 result (f input)))
+        ([result input & inputs]
+           (f1 result (apply f input inputs))))))
+#+END_SRC
+
+Now, let's pass in `identity` and see what the result is, just
+substituting `identity` for `f`:
+
+#+BEGIN_SRC clojure
+  (fn [f1]
+    (fn
+      ([] (f1))
+      ([result] (f1 result))
+      ([result input]
+         (f1 result (identity input)))
+      ([result input & inputs]
+         (f1 result (apply identity input inputs)))))
+#+END_SRC
+
+This is the transducer that we called `t-map-identity` above. We can
+see that `identity` is applied to the inputs before being passed on to
+the reducing function `f1`. This makes sense for a mapping transducer,
+where it's expected that `identity` is somehow applied to every
+element that passes through.
+
+Now, let's pass in `adder` to our written out `t-map-identity`:
+
+#+BEGIN_SRC clojure
+  (fn
+    ([] (adder))
+    ([result] (adder result))
+    ([result input]
+       (adder result (identity input)))
+    ([result input & inputs]
+       (adder result (apply identity input inputs))))
+#+END_SRC
+
+This is `transduced-adder`. We can verify that by using it in a reduce
+call like we did before.
+
+#+BEGIN_SRC clojure
+  (def transduced-adder-too
+    (fn
+      ([] (adder))
+      ([result] (adder result))
+      ([result input]
+         (adder result (identity input)))
+      ([result input & inputs]
+         (adder result (apply identity input inputs)))))
+
+  (reduce transduced-adder-too 0 [1 2 3 4]) ;=> 10
+#+END_SRC
+
+Once we see the code, it's easy to see how this happens, but it's
+interesting that only the 2-arity version of this gets called
+(otherwise we'd get an exception, since `adder` only has 2-arity, and
+`identity` only has 1-arity).
+
+But other than using a transducer to generate a reducing function that
+we can give `reduce`, Rich says that we can do a few other things. One
+is `transduce`, which just does a reduce with a transformation.
+
+#+BEGIN_SRC clojure
+  (def t-map-identity
+    (fn [f1]
+      (fn
+        ([] (f1))
+        ([result] (f1 result))
+        ([result input]
+           (f1 result (identity input)))
+        ([result input & inputs]
+           (f1 result (apply identity input inputs))))))
+
+  (transduce t-map-identity adder 0 [1 2 3 4]) ;=> 10
+#+END_SRC
+
+This is the same thing as our `reduce` call above! Let's look at the
+source for `transduce`.
+
+#+BEGIN_SRC clojure
+  (defn transduce
+    [xform f init coll]
+    (let [f (xform (completing f))
+          ret (if (instance? clojure.lang.IReduce coll)
+                (.reduce ^clojure.lang.IReduce coll f init)
+                (clojure.core.protocols/coll-reduce coll f init))
+          ret (f (if (reduced? ret) @ret ret))]
+      (if (reduced? ret) @ret ret)))
+#+END_SRC
+
+Things get hairy at the end, so let's simplify to a less optimized version:
+
+#+BEGIN_SRC clojure
+  (defn transduce
+    [xform f init coll]
+    (let [f (xform (completing f))
+          ret (reduce coll f init)
+          ret (f ret)]
+      ret))
+#+END_SRC
+
+The last piece we'll need to understand this is the `completing`
+function, a private clojure function that's defined as:
+
+#+BEGIN_SRC clojure
+  (defn completing [f]
+    (fn
+      ([] (f))
+      ([x] x)
+      ([x y] (f x y))))
+#+END_SRC
+
+So `completing` takes a function, and returns a function with three
+possible arities:
+
+- If 0 arguments are passed, the function is called with no arguments.
+  I think this implies that we should use functions that provide their
+  own identity value in that case, like `+` or `conj`.
+- If 1 argument is passed, that argument is returned.
+  Given the behavior from above, this should be the same as `(f (f) x)`
+- If 2 arguments are passed, both arguments are passed to `f`
+
+To have our `adder` behave this way, let's just use `+` instead. Also
+note that `(completing +)` is equivalent to `+`.
+
+Using that information, let's see a call to transduce using our
+`t-map-identity` and our revamped `adder` (we'll keep `coll` and
+`init` unbound).
+
+#+BEGIN_SRC clojure
+  (let [f (t-map-identity (completing +))
+        ;; Written out is
+        f ((fn [f1]
+             (fn
+               ([] (f1))
+               ([result] (f1 result))
+               ([result input]
+                  (f1 result (identity input)))
+               ([result input & inputs]
+                  (f1 result (apply identity input inputs)))))
+           +)
+        ;; Again rewrite
+        f (fn
+            ([] (+))
+            ([result] (+ result))
+            ([result input]
+               (+ result (identity input)))
+            ([result input & inputs]
+               (+ result (apply identity input inputs))))
+        ;; This is basically + except it throws an exception with > 2 arguments
+        ;; Now the reduce
+        ret (reduce coll f init) ;; equivalent to (reduce coll + init)
+        ret (f ret) ;; equivalent to (+ ret) or ret
+        ]
+    ret)
+#+END_SRC
+
+Which is all an elaborate way of showing that we've just done a
+`reduce` with `+`.
+
+However, now that we understand the mechanics of a map transducer, we
+can understand how a to apply a function to every element
+before the reduce call. For example, to double every element:
+
+#+BEGIN_SRC clojure
+  (transduce (map (partial * 2)) + 0 [1 2 3 4]) ;=> 20
+#+END_SRC
+
+
+
+Let's try a reducing function that joins lists into one, `conjer`:
+
+#+BEGIN_SRC clojure
+  (def conjer
+    (fn [memo next]
+      (conj memo next)))
+#+END_SRC
+
+We can use this with reduce:
+
+#+BEGIN_SRC clojure
+  (reduce conjer [] [1 2 3]) ;=> [1 2 3]
+#+END_SRC
