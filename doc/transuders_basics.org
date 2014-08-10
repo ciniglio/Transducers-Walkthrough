@@ -221,18 +221,71 @@ before the reduce call. For example, to double every element:
   (transduce (map (partial * 2)) + 0 [1 2 3 4]) ;=> 20
 #+END_SRC
 
-
-
-Let's try a reducing function that joins lists into one, `conjer`:
-
-#+BEGIN_SRC clojure
-  (def conjer
-    (fn [memo next]
-      (conj memo next)))
-#+END_SRC
-
-We can use this with reduce:
+It's worth noting that the list here is traversed only once, instead
+of the two traversals that the usual way would require:
 
 #+BEGIN_SRC clojure
-  (reduce conjer [] [1 2 3]) ;=> [1 2 3]
+  (->> [1 2 3 4] (map (partial * 2)) (reduce +)) ;=> 20
 #+END_SRC
+
+Now that we know how `map` builds a transducer, let's try to work out
+how `filter` should be implemented, without looking at the Clojure
+source.
+
+We know that while map applies the provided `f` to every input, filter
+instead uses the provided function `p` as a predicate to determine
+whether to pass the input to the next function. So we'll take the
+`map` source from above, but instead of apply `f` to next before
+passing it to `f1`, we'll only pass next to `f1` if `(p next)` is
+true.
+
+#+BEGIN_SRC clojure
+  (defn a-filter [p]
+    (fn [f1]
+      (fn ([result next]
+             (if (p next)
+               (f1 result next)
+               (f1 result))))))
+#+END_SRC
+
+This actually ends up being just like the clojure core code, only with
+fewer arities. If we use the above with transduce, we actually do get
+an `ArityException`. 
+
+#+BEGIN_SRC clojure
+  (transduce (a-filter even?) + 0 [1 2 3 4]) ;=> ArityException
+#+END_SRC
+
+Let's add the extra arities and see when exactly they're called.
+
+#+BEGIN_SRC clojure
+    (defn a-filter [p]
+      (fn [f1]
+        (fn
+          ([] (prn "No args!") (f1))
+          ([result] (prn "1 Arg: " result) result)
+          ([result next]
+             (prn "2 Args: " result ", " next)
+             (if (p next)
+               (f1 result next)
+               (f1 result))))))
+#+END_SRC
+
+Run it with transduce.
+
+#+BEGIN_SRC clojure
+  (transduce (a-filter even?) + 0 [1 2 3 4])
+  ;; "2 Args: " 0 ", " 1
+  ;; "2 Args: " 0 ", " 2
+  ;; "2 Args: " 2 ", " 3
+  ;; "2 Args: " 2 ", " 4
+  ;; "1 Arg: " 6
+  ;; 6
+#+END_SRC
+
+So we see that our final reducer function gets called one last time
+with the result.
+
+This is different than how reduce usually behaves and is caused by the
+last line in the `let` of the implementation for `transduce`.
+
